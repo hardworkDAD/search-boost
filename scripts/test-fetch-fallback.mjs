@@ -281,6 +281,58 @@ try {
       } finally { AbortSignal.timeout = nativeTimeout }
     })
 
+
+    await test('firecrawl scrape fills thin origin content and reports via=firecrawl', async () => {
+      const fcBody = { success: true, data: { markdown: '# Rendered\n\n' + 'JavaScript-rendered paragraph with substance. '.repeat(20) } }
+      const fc = await fixture((req, res) => {
+        let body = ''
+        req.on('data', (c) => { body += c })
+        req.on('end', () => {
+          const parsed = JSON.parse(body)
+          assert.equal(req.method, 'POST')
+          assert.equal(req.url, '/v2/scrape')
+          assert.equal(req.headers.authorization, 'Bearer fc-test-key')
+          assert.ok(parsed.url.includes('/thin'))
+          assert.deepEqual(parsed.formats, ['markdown'])
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(fcBody))
+        })
+      })
+      const thin = await fixture((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><p>hi</p></body></html>') })
+      try {
+        const cache = makePageCache()
+        const result = await fetchPage(`http://127.0.0.1:${thin.port}/thin`, undefined, cache, undefined, {
+          firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
+        })
+        assert.equal(result.via, 'firecrawl')
+        assert.ok(result.content.includes('JavaScript-rendered paragraph'))
+        assert.ok(result.word_count > 20)
+      } finally { await fc.close(); await thin.close() }
+    })
+
+    await test('firecrawl failure chains into the final error', async () => {
+      const fc = await fixture((req, res) => { res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"success":false}') })
+      const dead = await fixture((req, res) => { res.writeHead(500, { 'content-type': 'text/html' }); res.end('nope') })
+      try {
+        const cache = makePageCache()
+        // Origin fails, Firecrawl fails, Jina is unreachable hermetically:
+        // the chained error must mention firecrawl.
+        await assert.rejects(
+          fetchPage(`http://127.0.0.1:${dead.port}/dead`, undefined, cache, undefined, {
+            firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
+          }),
+          /firecrawl failed/,
+        )
+      } finally { await fc.close(); await dead.close() }
+    })
+
+    await test('firecrawl skipped when no key configured; chain unchanged', async () => {
+      const cache = makePageCache()
+      const result = await fetchPage(url, undefined, cache)
+      assert.equal(result.via, 'local')
+      assert.ok(result.content.includes('Useful documentation'))
+    })
+
     await test('loopback timing sample compares the fast path, raw curl, and cache', async () => {
       const originMs = [], curlMs = [], cachedMs = []
       const cache = makePageCache()

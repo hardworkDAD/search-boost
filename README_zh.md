@@ -58,7 +58,7 @@
 - **多引擎并行检索与去重 (`fused_search`)**  
   同时聚合多个搜索引擎的实时结果。内置**免密钥免费池**（Bing、DuckDuckGo、Exa-free、AnySearch）与**API 池**（Tavily、Brave、Exa、AnySearch、TinyFish、DeepSeek Search、Firecrawl、Keenable），自动执行跨引擎 URL 规范化去重、域名过滤与权重重排。
 - **高净度网页正文提取 (`fetch_page`)**  
-  优先抓取原站降低等待；必要时使用同线路 curl 兼容兜底，Jina Reader 作为备用读取方式。自动剔除 CSS、JS 及广告噪音，支持 `focus` 关键词段落提炼，具备内存缓存与大体积熔断保护。
+  优先抓取原站降低等待；必要时使用同线路 curl 兼容兜底，配置了 Firecrawl key 时优先用其抓取 JS 重的页面，Jina Reader 作为备用读取方式。自动剔除 CSS、JS 及广告噪音，支持 `focus` 关键词段落提炼，具备内存缓存与大体积熔断保护。
 - **五平台社区检索 (`community_search`)**
   显式选择 Reddit、X、B站、知乎、小红书。普通 TUI 每个平台只提供一个免费接入：Reddit 归档、X 基础检索，以及三平台内置原生接入；无需单独部署 MCP、Docker 或浏览器桥。首次配置最后提供可选安装：选择本机 Chrome / Chromium 或可卸载的 SearchBoost 独立下载；后台生成二维码，用平台 App 扫码确认并自动验证身份。Community 支持启停、重新登录和卸载。旧索引 / 桥接配置保持兼容，不作为多个免费接口候选。讨论完整性以当前会话可验证范围为限；B站以公开笔记为主体、评论样本为补充，不抓视频转录。配置完成不保证平台访问或全量覆盖。详见[会话接入与边界](docs/community-search.md#会话和接入)。
 - **Jev / Laya 意图导向搜索 (`adaptive_search` · 实验功能)**
@@ -267,7 +267,7 @@ search-boost
 
 ### 2. `fetch_page` 智能网页提炼
 
-获取搜索结果中的链接正文。优先抓取原站并清理正文；PDF 会先在本地抽取正文，抽取不到时才回退到 Jina Reader；安装了 curl 时可用于传输兼容兜底。
+获取搜索结果中的链接正文。优先抓取原站并清理正文；PDF 会先在本地抽取正文。原站内容不足时，若配置了 Firecrawl key 则先用其抓取（可渲染 JS 重的页面），再回退到 Jina Reader；安装了 curl 时可用于传输兼容兜底。
 
 **调用参数范例**：
 ```json
