@@ -326,6 +326,28 @@ try {
       } finally { await fc.close(); await dead.close() }
     })
 
+    await test('firecrawl markdown with control-like chars is not misdetected as binary', async () => {
+      // Regression: looksBinary expects bytes; passing the markdown string
+      // directly caused false 'undecodable text' rejections.
+      const fcBody = { success: true, data: { markdown: '# T\n\nLine with\ttab and\nnewlines. '.repeat(30) } }
+      const fc = await fixture((req, res) => {
+        let body = ''
+        req.on('data', (c) => { body += c })
+        req.on('end', () => {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(fcBody))
+        })
+      })
+      const thin = await fixture((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><p>hi</p></body></html>') })
+      try {
+        const cache = makePageCache()
+        const result = await fetchPage(`http://127.0.0.1:${thin.port}/thin`, undefined, cache, undefined, {
+          firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
+        })
+        assert.equal(result.via, 'firecrawl')
+      } finally { await fc.close(); await thin.close() }
+    })
+
     await test('firecrawl skipped when no key configured; chain unchanged', async () => {
       const cache = makePageCache()
       const result = await fetchPage(url, undefined, cache)
