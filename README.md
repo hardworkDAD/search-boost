@@ -267,7 +267,7 @@ Dispatches queries across engines concurrently, normalizes URLs, strips redirect
 
 ### 2. `fetch_page` Smart Content Reader
 
-Reads webpage content from search URLs. Reads and cleans the origin first; PDFs are extracted to text locally and only fall back to Jina Reader when that fails; curl handles transport compatibility when installed.
+Reads webpage content from search URLs. Reads and cleans the origin first; PDFs are extracted to text locally. When the origin yields little, a configured Firecrawl key is used to scrape (handles JS-heavy pages), falling back to Jina Reader; curl handles transport compatibility when installed.
 
 **Tool Arguments Example**:
 ```json
