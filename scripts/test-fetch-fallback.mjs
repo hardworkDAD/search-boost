@@ -39,6 +39,12 @@ async function test(name, action) {
   catch (err) { process.exitCode = 1; console.error(`FAIL: ${name}\n${err.stack}`) }
   finally { await closeFetchDispatchers(); __setUndiciLoaderForTests(null); __setCurlSpawnForTests(null) }
 }
+// The reader fallback must be pinned for any case that reaches it, or the test
+// makes a real request to r.jina.ai and passes only while that host fails.
+const blockJina = (status = 503) => __setUndiciLoaderForTests(async () => ({
+  ...undici,
+  fetch: (u, opts) => String(u).startsWith('https://r.jina.ai/') ? new Response('', { status }) : undici.fetch(u, opts),
+}))
 const origin = await fixture((req, res) => {
   if (req.url === '/relative-redirect') { res.writeHead(302, { location: '/docs/page' }); res.end(); return }
   if (req.url === '/docs/page') { res.end(`<a href="sibling">Sibling</a><p>${prose}</p>`); return }
@@ -311,18 +317,71 @@ try {
     })
 
     await test('firecrawl failure chains into the final error', async () => {
+      blockJina()
       const fc = await fixture((req, res) => { res.writeHead(500, { 'content-type': 'application/json' }); res.end('{"success":false}') })
       const dead = await fixture((req, res) => { res.writeHead(500, { 'content-type': 'text/html' }); res.end('nope') })
       try {
         const cache = makePageCache()
-        // Origin fails, Firecrawl fails, Jina is unreachable hermetically:
-        // the chained error must mention firecrawl.
+        // Origin fails, Firecrawl fails, Jina is pinned to 503: the chained
+        // error must mention firecrawl without leaving the machine.
         await assert.rejects(
           fetchPage(`http://127.0.0.1:${dead.port}/dead`, undefined, cache, undefined, {
             firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
           }),
           /firecrawl failed/,
         )
+      } finally { await fc.close(); await dead.close() }
+    })
+
+    await test('malformed scrape JSON never echoes the provider body', async () => {
+      blockJina()
+      const fc = await fixture((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('SECRET_SCRAPE_BODY not json') })
+      const dead = await fixture((req, res) => { res.writeHead(500); res.end('nope') })
+      try {
+        await assert.rejects(
+          fetchPage(`http://127.0.0.1:${dead.port}/dead`, undefined, makePageCache(), undefined, {
+            firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
+          }),
+          (err) => {
+            assert.equal(err.message.includes('SECRET_SCRAPE_BODY'), false, 'V8 quotes invalid input in its JSON.parse error')
+            assert.match(err.message, /firecrawl scrape: invalid JSON response/)
+            return true
+          },
+        )
+      } finally { await fc.close(); await dead.close() }
+    })
+
+    await test('an unsuccessful scrape never echoes the provider error text', async () => {
+      blockJina()
+      const fc = await fixture((req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: 'SECRET provider detail' }))
+      })
+      const dead = await fixture((req, res) => { res.writeHead(500); res.end('nope') })
+      try {
+        await assert.rejects(
+          fetchPage(`http://127.0.0.1:${dead.port}/dead`, undefined, makePageCache(), undefined, {
+            firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
+          }),
+          (err) => {
+            assert.equal(err.message.includes('SECRET'), false)
+            assert.match(err.message, /firecrawl scrape: unsuccessful response/)
+            return true
+          },
+        )
+      } finally { await fc.close(); await dead.close() }
+    })
+
+    await test('scrape baseUrl keeps its gateway path prefix', async () => {
+      blockJina()
+      const seen = []
+      const fc = await fixture((req, res) => { seen.push(req.url); res.writeHead(500); res.end() })
+      const dead = await fixture((req, res) => { res.writeHead(500); res.end('nope') })
+      try {
+        await assert.rejects(fetchPage(`http://127.0.0.1:${dead.port}/dead`, undefined, makePageCache(), undefined, {
+          firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}/pool/v2/` },
+        }))
+        assert.deepEqual(seen, ['/pool/v2/v2/scrape'])
       } finally { await fc.close(); await dead.close() }
     })
 
