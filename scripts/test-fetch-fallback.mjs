@@ -12,6 +12,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fetchPage, makePageCache } from '../lib/search/fetch.js'
+import { runFetchPage } from '../lib/runtime.mjs'
+import { writeKeysFile } from '../lib/keys.mjs'
 import { guardedFetch } from '../lib/search/ssrf.js'
 import { curlPageFetch, __setCurlSpawnForTests } from '../lib/search/curl-fetch.mjs'
 import { __setUndiciLoaderForTests, closeFetchDispatchers } from '../lib/search/ipv4-fetch.js'
@@ -405,6 +407,67 @@ try {
         })
         assert.equal(result.via, 'firecrawl')
       } finally { await fc.close(); await thin.close() }
+    })
+
+    await test('a hanging scrape leaves the remaining page budget to the reader', async () => {
+      const nativeTimeout = AbortSignal.timeout
+      AbortSignal.timeout = (ms) => nativeTimeout(ms === 15_000 ? 80 : ms)
+      const fc = await fixture(() => { /* never responds: the stage budget must abort it */ })
+      const thin = await fixture((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><p>hi</p></body></html>') })
+      try {
+        __setUndiciLoaderForTests(async () => ({
+          ...undici,
+          fetch: (u, opts) => String(u).startsWith('https://r.jina.ai/') ? new Response(prose) : undici.fetch(u, opts),
+        }))
+        const start = performance.now()
+        const page = await fetchPage(`http://127.0.0.1:${thin.port}/thin-hang`, undefined, makePageCache(), undefined, {
+          firecrawl: { key: 'fc-test-key', baseUrl: `http://127.0.0.1:${fc.port}` },
+        })
+        assert.equal(page.via, 'jina', 'the reader must still get its turn')
+        assert.ok(performance.now() - start < 1500, 'a hanging scrape must not consume the reader budget')
+      } finally { AbortSignal.timeout = nativeTimeout; await fc.close(); await thin.close() }
+    })
+
+    await test('runFetchPage reads the Firecrawl key and base URL from configuration', async () => {
+      blockJina()
+      const fcBody = { success: true, data: { markdown: '# Rendered\n\n' + 'Configured paragraph with substance. '.repeat(20) } }
+      const seen = []
+      const fc = await fixture((req, res) => {
+        let body = ''
+        req.on('data', (c) => { body += c })
+        req.on('end', () => {
+          seen.push({ url: req.url, auth: req.headers.authorization })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(fcBody))
+        })
+      })
+      const thin = await fixture((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><p>hi</p></body></html>') })
+      writeKeysFile({ firecrawl: 'fc-wired-key', baseUrls: { firecrawl: `http://127.0.0.1:${fc.port}/pool/v2/` } })
+      try {
+        const page = await runFetchPage(`http://127.0.0.1:${thin.port}/wired`)
+        assert.equal(page.via, 'firecrawl')
+        assert.ok(page.content.includes('Configured paragraph'))
+        assert.deepEqual(seen, [{ url: '/pool/v2/v2/scrape', auth: 'Bearer fc-wired-key' }])
+      } finally {
+        writeKeysFile({ firecrawl: undefined, baseUrls: { firecrawl: null } })
+        await fc.close(); await thin.close()
+      }
+    })
+
+    await test('runFetchPage never scrapes without a Firecrawl key', async () => {
+      blockJina()
+      let hits = 0
+      const fc = await fixture((req, res) => { hits++; res.writeHead(500); res.end() })
+      const thin = await fixture((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><p>hi</p></body></html>') })
+      writeKeysFile({ firecrawl: undefined, baseUrls: { firecrawl: `http://127.0.0.1:${fc.port}` } })
+      try {
+        const page = await runFetchPage(`http://127.0.0.1:${thin.port}/no-key`)
+        assert.equal(hits, 0, 'a base URL alone must not trigger a billable scrape')
+        assert.equal(page.via, 'local')
+      } finally {
+        writeKeysFile({ baseUrls: { firecrawl: null } })
+        await fc.close(); await thin.close()
+      }
     })
 
     await test('firecrawl skipped when no key configured; chain unchanged', async () => {
